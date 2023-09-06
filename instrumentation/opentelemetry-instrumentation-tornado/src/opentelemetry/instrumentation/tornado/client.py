@@ -117,12 +117,13 @@ def _finish_tracing_callback(
         response = e.response
     except ConnectionRefusedError as e:
         response = None
+        status_code = 503
 
     if span.is_recording() and exc:
         if isinstance(exc, HTTPError):
             status_code = exc.code
         description = f"{type(exc).__name__}: {exc}"
-    else:
+    elif response:
         status_code = response.code
 
     if status_code is not None:
