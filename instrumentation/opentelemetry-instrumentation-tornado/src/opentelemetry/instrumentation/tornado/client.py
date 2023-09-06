@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from time import time_ns
+from time import time_ns, time
 
 from tornado.httpclient import HTTPError, HTTPRequest
 
@@ -92,6 +92,7 @@ def fetch_async(
                 duration_histogram=duration_histogram,
                 request_size_histogram=request_size_histogram,
                 response_size_histogram=response_size_histogram,
+                request=request,
             )
         )
         return future
@@ -104,12 +105,18 @@ def _finish_tracing_callback(
     duration_histogram,
     request_size_histogram,
     response_size_histogram,
+    request
 ):
     status_code = None
     description = None
     exc = future.exception()
 
-    response = future.result()
+    try:
+        response = future.result()
+    except HTTPError as e:
+        response = e.response
+    except ConnectionRefusedError as e:
+        response = None
 
     if span.is_recording() and exc:
         if isinstance(exc, HTTPError):
@@ -127,26 +134,32 @@ def _finish_tracing_callback(
             )
         )
 
-    metric_attributes = _create_metric_attributes(response)
-    request_size = int(response.request.headers.get("Content-Length", 0))
-    response_size = int(response.headers.get("Content-Length", 0))
+    if response:
+        metric_attributes = {
+            SpanAttributes.HTTP_STATUS_CODE: response.code,
+            SpanAttributes.HTTP_URL: remove_url_credentials(response.request.url),
+            SpanAttributes.HTTP_METHOD: response.request.method,
+        }
+        request_size = int(response.request.headers.get("Content-Length", 0))
+        response_size = int(response.headers.get("Content-Length", 0))
+        duration_histogram.record(
+            response.request_time, attributes=metric_attributes
+        )
+    else:
+        metric_attributes = {
+            SpanAttributes.HTTP_STATUS_CODE: status_code,
+            SpanAttributes.HTTP_URL:  remove_url_credentials(request.url),
+            SpanAttributes.HTTP_METHOD: request.method
+        }
+        request_size = request.headers.get("Content-Length", 0)
+        response_size = 0
+        duration_histogram.record(
+            time() - request._start_time, attributes=metric_attributes
+        )
 
-    duration_histogram.record(
-        response.request_time, attributes=metric_attributes
-    )
     request_size_histogram.record(request_size, attributes=metric_attributes)
     response_size_histogram.record(response_size, attributes=metric_attributes)
 
     if response_hook:
         response_hook(span, future)
     span.end()
-
-
-def _create_metric_attributes(response):
-    metric_attributes = {
-        SpanAttributes.HTTP_STATUS_CODE: response.code,
-        SpanAttributes.HTTP_URL: remove_url_credentials(response.request.url),
-        SpanAttributes.HTTP_METHOD: response.request.method,
-    }
-
-    return metric_attributes
